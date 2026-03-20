@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton,
                              QFrame, QCheckBox, QMessageBox, QSlider, QFileDialog,
-                             QProgressDialog)
+                             QProgressDialog, QInputDialog)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap, QPainter
 import os
@@ -62,18 +62,18 @@ class MyGUI(QMainWindow):
 
         self.imageLabel = QLabel('Load a video to begin', self)
         self.imageLabel.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-        self.imageLabel.resize(640, 480)
+        self.imageLabel.resize(1280, 720)
         self.imageLabel.move(10, 60)
         self.imageLabel.setFrameShape(QFrame.Box)
 
         self.statusLabel = QLabel('Navigate to a frame and click "Detect Frame" or enable Auto-detect', self)
-        self.statusLabel.resize(640, 22)
+        self.statusLabel.resize(1280, 22)
         self.statusLabel.move(10, 543)
         self.statusLabel.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
         self.statusLabel.setStyleSheet('color: gray;')
 
         self.frameSlider = QSlider(Qt.Horizontal, self)
-        self.frameSlider.resize(640, 22)
+        self.frameSlider.resize(1280, 22)
         self.frameSlider.move(10, 568)
         self.frameSlider.setEnabled(False)
 
@@ -131,6 +131,11 @@ class MyGUI(QMainWindow):
         )
         if not path:
             return
+        camId, ok = QInputDialog.getText(self, 'Camera Number', 'Camera ID (e.g. cam1, cam8):',
+                                         text=getattr(self, 'camId', ''))
+        if not ok:
+            return
+        self.camId = camId.strip() if camId.strip() else 'cam'
         if self.cap:
             self.cap.release()
         self.cap = cv2.VideoCapture(path)
@@ -144,12 +149,15 @@ class MyGUI(QMainWindow):
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
 
+        self.origW = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.origH = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
         self.frames = []
         while True:
             ret, frame = self.cap.read()
             if not ret:
                 break
-            frame = cv2.resize(frame, (640, 480))
+            frame = cv2.resize(frame, (1280, 720))
             ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 self.frames.append(buf)
@@ -292,7 +300,7 @@ class MyGUI(QMainWindow):
     def runFisheyeCalibration(self):
         objp       = make_objp()
         objpoints  = [objp] * self.confirmedImagesCounter
-        img_size   = (640, 480)
+        img_size   = (1280, 720)
         K          = np.zeros((3, 3))
         D          = np.zeros((4, 1))
         flags      = (cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC |
@@ -320,17 +328,17 @@ class MyGUI(QMainWindow):
         first_frame = cv2.imdecode(self.frames[self.currentFrameIndex], cv2.IMREAD_COLOR)
         undistorted = self.undistortFrame(first_frame, K, D)
         side_by_side = np.hstack([first_frame, undistorted])
-        side_by_side = cv2.resize(side_by_side, (640, 480))
+        side_by_side = cv2.resize(side_by_side, (1280, 720))
         cv2.putText(side_by_side, 'Original', (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(side_by_side, 'Undistorted', (330, 25),
+        cv2.putText(side_by_side, 'Undistorted', (650, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         self.pixmap = self.toPixmap(side_by_side)
         self.update()
 
         self.statusLabel.setStyleSheet('color: green; font-weight: bold;')
         self.statusLabel.setText(
-            f'Calibration done!  RMS error: {rms:.4f} px  |  Results saved to ./output/')
+            f'Calibration done!  RMS error: {rms:.4f} px  |  Results saved to ./output/{self.camId}/')
 
         QMessageBox.information(self, 'Calibration Complete',
             f'Fisheye calibration finished!\n\n'
@@ -339,7 +347,7 @@ class MyGUI(QMainWindow):
             f'cx={K[0,2]:.1f}  cy={K[1,2]:.1f}\n'
             f'k1={D[0,0]:.5f}  k2={D[1,0]:.5f}\n'
             f'k3={D[2,0]:.5f}  k4={D[3,0]:.5f}\n\n'
-            f'Saved to ./output/')
+            f'Saved to ./output/{self.camId}/')
 
     def undistortFrame(self, frame, K, D):
         h, w = frame.shape[:2]
@@ -350,16 +358,34 @@ class MyGUI(QMainWindow):
         return cv2.remap(frame, map1, map2, interpolation=cv2.INTER_LINEAR)
 
     def saveResults(self, K, D, rvecs, tvecs, rms):
-        os.makedirs('./output', exist_ok=True)
-        # NumPy binary (used by test app)
-        np.save('./output/K.npy', K)
-        np.save('./output/D.npy', D)
-        np.save('./output/rvecs.npy', np.array(rvecs))
-        np.save('./output/tvecs.npy', np.array(tvecs))
+        folder = f'./output/{self.camId}'
+        os.makedirs(folder, exist_ok=True)
+
+        # Scale K from calibration resolution (1280x720) to original video resolution
+        sx = self.origW / 1280
+        sy = self.origH / 720
+        K_orig = K.copy()
+        K_orig[0, 0] *= sx  # fx
+        K_orig[1, 1] *= sy  # fy
+        K_orig[0, 2] *= sx  # cx
+        K_orig[1, 2] *= sy  # cy
+
+        # NumPy binary — K at original resolution, ready to use directly
+        np.save(f'{folder}/K.npy', K_orig)
+        np.save(f'{folder}/D.npy', D)
+        np.save(f'{folder}/rvecs.npy', np.array(rvecs))
+        np.save(f'{folder}/tvecs.npy', np.array(tvecs))
         # Human-readable
-        with open('./output/intrinsic.txt', 'w') as f:
-            f.write(f'K=\n{K}\n\nD (k1,k2,k3,k4)=\n{D}\n\nRMS reprojection error: {rms:.6f} px\n')
-        with open('./output/extrinsic.txt', 'w') as f:
+        with open(f'{folder}/intrinsic.txt', 'w') as f:
+            f.write(
+                f'Calibration resolution: 1280x720\n'
+                f'Original video resolution: {self.origW}x{self.origH}\n\n'
+                f'K (scaled to {self.origW}x{self.origH})=\n{K_orig}\n\n'
+                f'K (calibration 1280x720)=\n{K}\n\n'
+                f'D (k1,k2,k3,k4)=\n{D}\n\n'
+                f'RMS reprojection error: {rms:.6f} px\n'
+            )
+        with open(f'{folder}/extrinsic.txt', 'w') as f:
             for i, (rv, tv) in enumerate(zip(rvecs, tvecs)):
                 f.write(f'Frame {i+1}:\n  rvec={rv.T}\n  tvec={tv.T}\n')
 
